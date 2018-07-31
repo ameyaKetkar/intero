@@ -11,6 +11,7 @@
 ;; Author: Chris Done <chrisdone@fpcomplete.com>
 ;; Maintainer: Chris Done <chrisdone@fpcomplete.com>
 ;; URL: https://github.com/commercialhaskell/intero
+;; Package-Version: 20180418.503
 ;; Created: 3rd June 2016
 ;; Version: 0.1.13
 ;; Keywords: haskell, tools
@@ -112,8 +113,7 @@ This causes it to skip building the target."
 It should be a list of directories.
 
 To use this, use the following mode hook:
-  (add-hook 'haskell-mode-hook 'intero-mode-whitelist)
-or use `intero-global-mode' and add \"/\" to `intero-blacklist'."
+  (add-hook 'haskell-mode-hook 'intero-mode-whitelist)"
   :group 'intero
   :type 'string)
 
@@ -124,8 +124,7 @@ or use `intero-global-mode' and add \"/\" to `intero-blacklist'."
 It should be a list of directories.
 
 To use this, use the following mode hook:
-  (add-hook 'haskell-mode-hook 'intero-mode-blacklist)
-or use `intero-global-mode'."
+  (add-hook 'haskell-mode-hook 'intero-mode-blacklist)"
   :group 'intero
   :type 'string)
 
@@ -215,6 +214,7 @@ by default."
 
 (define-key intero-mode-map (kbd "C-c C-t") 'intero-type-at)
 (define-key intero-mode-map (kbd "M-?") 'intero-uses-at)
+(define-key intero-mode-map (kbd "C-c C-p") 'intero-pattern)
 (define-key intero-mode-map (kbd "C-c C-i") 'intero-info)
 (define-key intero-mode-map (kbd "M-.") 'intero-goto-definition)
 (define-key intero-mode-map (kbd "C-c C-l") 'intero-repl-load)
@@ -431,8 +431,7 @@ You can use this to kill them or look inside."
          when (string-match
                "\\(.*?\\):(\\([0-9]+\\),\\([0-9]+\\))-(\\([0-9]+\\),\\([0-9]+\\))$"
                use)
-         do (let* ((returned-file (match-string 1 use))
-                   (loaded-file (intero-extend-path-by-buffer-host returned-file))
+         do (let* ((fp (match-string 1 use))
                    (sline (string-to-number (match-string 2 use)))
                    (scol (string-to-number (match-string 3 use)))
                    (eline (string-to-number (match-string 4 use)))
@@ -441,7 +440,7 @@ You can use this to kill them or look inside."
                                           (forward-line (1- sline))
                                           (forward-char (1- scol))
                                           (point))))
-              (when (intero-temp-file-p loaded-file)
+              (when (string= fp (intero-temp-file-name))
                 (unless highlighted
                   (intero-highlight-uses-mode))
                 (setq highlighted t)
@@ -512,15 +511,36 @@ line as a type signature."
         (insert help-string)
         (goto-char (point-min))))))
 
+
+(defun print-elements-of-list (list)
+  "Print each element of LIST on a line of its own."
+  (while list
+    (print (car list))
+    (setq list (cdr list))))
+
+(defun intero-pattern (ident)
+  "Get the info of the thing with IDENT at point."
+  (interactive (list (intero-ident-at-point)))
+  (let* ((origin-buffer (current-buffer))
+        (package (intero-package-name))
+        (info (intero-get-info-of ident))
+        (origin (buffer-name))
+        (fst (split-string info "="))
+        ;;(snd (split-string info "\\|"))
+        )
+    (message info)
+    (print-elements-of-list fst)
+    ;;(message snd)
+    (with-current-buffer (pop-to-buffer (intero-help-buffer))
+      insert info)))
+
 (defun intero-goto-definition ()
   "Jump to the definition of the thing at point.
 Returns nil when unable to find definition."
   (interactive)
   (let ((result (apply #'intero-get-loc-at (intero-thing-at-point))))
-
-    (if (not (string-match "\\(.*?\\):(\\([0-9]+\\),\\([0-9]+\\))-(\\([0-9]+\\),\\([0-9]+\\))$"
-                       result))
-        (message "%s" result)
+    (when (string-match "\\(.*?\\):(\\([0-9]+\\),\\([0-9]+\\))-(\\([0-9]+\\),\\([0-9]+\\))$"
+                        result)
       (if (fboundp 'xref-push-marker-stack) ;; Emacs 25
           (xref-push-marker-stack)
         (with-no-warnings
@@ -535,10 +555,7 @@ Returns nil when unable to find definition."
                   (switch-to-buffer original-buffer)
                 (error "Attempted to load temp file.  Try restarting Intero.
 If the problem persists, please report this as a bug!")))
-          (find-file
-           (expand-file-name
-            returned-file
-            (intero-extend-path-by-buffer-host (intero-project-root)))))
+          (find-file loaded-file))
         (pop-mark)
         (goto-char (point-min))
         (forward-line (1- line))
@@ -1673,11 +1690,10 @@ The path returned is canonicalized and stripped of any text properties."
   (with-current-buffer (or buffer (current-buffer))
     (if (or (eq nil (intero-buffer-host)) (eq "" (intero-buffer-host)))
         path
-      (expand-file-name
-       (concat "/"
-               (intero-buffer-host)
-               ":"
-               path)))))
+      (concat "/"
+              (intero-buffer-host)
+              ":"
+              path))))
 
 (defvar-local intero-temp-file-name nil
   "The name of a temporary file to which the current buffer's content is copied.")
@@ -2089,31 +2105,29 @@ yaml config to use, or stack's default when nil."
   "Send WORKER the command string CMD, via a network connection.
 The result, along with the given STATE, is passed to CALLBACK
 as (CALLBACK STATE REPLY)."
-  (if (file-remote-p default-directory)
-      (intero-async-call worker cmd state callback)
-      (let ((buffer (intero-buffer worker)))
-        (if (and buffer (process-live-p (get-buffer-process buffer)))
-            (with-current-buffer buffer
-              (if intero-service-port
-                  (let* ((buffer (generate-new-buffer (format " intero-network:%S" worker)))
-                         (process
-                          (make-network-process
-                           :name (format "%S" worker)
-                           :buffer buffer
-                           :host 'local
-                           :service intero-service-port
-                           :family 'ipv4
-                           :nowait t
-                           :noquery t
-                           :sentinel 'intero-network-call-sentinel)))
-                    (with-current-buffer buffer
-                      (setq intero-async-network-cmd cmd)
-                      (setq intero-async-network-state state)
-                      (setq intero-async-network-worker worker)
-                      (setq intero-async-network-callback callback)))
-                (progn (when intero-debug (message "No `intero-service-port', falling back ..."))
-                       (intero-async-call worker cmd state callback))))
-          (error "Intero process is not running: run M-x intero-restart to start it")))))
+  (let ((buffer (intero-buffer worker)))
+    (if (and buffer (process-live-p (get-buffer-process buffer)))
+        (with-current-buffer buffer
+          (if intero-service-port
+              (let* ((buffer (generate-new-buffer (format " intero-network:%S" worker)))
+                     (process
+                      (make-network-process
+                       :name (format "%S" worker)
+                       :buffer buffer
+                       :host 'local
+                       :service intero-service-port
+                       :family 'ipv4
+                       :nowait t
+                       :noquery t
+                       :sentinel 'intero-network-call-sentinel)))
+                (with-current-buffer buffer
+                  (setq intero-async-network-cmd cmd)
+                  (setq intero-async-network-state state)
+                  (setq intero-async-network-worker worker)
+                  (setq intero-async-network-callback callback)))
+            (progn (when intero-debug (message "No `intero-service-port', falling back ..."))
+                   (intero-async-call worker cmd state callback))))
+      (error "Intero process is not running: run M-x intero-restart to start it"))))
 
 (defun intero-network-call-sentinel (process event)
   (pcase event
@@ -2170,11 +2184,10 @@ as (CALLBACK STATE REPLY)."
 
 (defun intero-buffer (worker)
   "Get the WORKER buffer for the current directory."
-  (let ((buffer (intero-get-buffer-create worker))
-        (targets (buffer-local-value 'intero-targets (current-buffer))))
+  (let ((buffer (intero-get-buffer-create worker)))
     (if (get-buffer-process buffer)
         buffer
-      (intero-get-worker-create worker targets (current-buffer)
+      (intero-get-worker-create worker nil (current-buffer)
                                 (buffer-local-value
                                  'intero-stack-yaml (current-buffer))))))
 
@@ -2204,86 +2217,34 @@ If supplied, use the given TARGETS, SOURCE-BUFFER and STACK-YAML."
       (erase-buffer)
       (insert (cl-case install-status
                 (not-installed "Intero is not installed in the Stack environment.")
-                (wrong-version "The wrong version of Intero is installed for this Emacs package.")))
-      (if (intero-version>= (intero-stack-version) '(1 6 1))
-          (intero-copy-compiler-tool-auto-install source-buffer targets buffer)
-        (intero-old-auto-install source-buffer targets buffer stack-yaml)))))
-
-(defun intero-copy-compiler-tool-auto-install (source-buffer targets buffer)
-  "Automatically install Intero appropriately for BUFFER.
-Use the given TARGETS, SOURCE-BUFFER and STACK-YAML."
-  (let ((ghc-version (intero-ghc-version-raw)))
-    (insert
-     (format "
-
-Installing intero-%s for GHC %s ...
-
-" intero-package-version ghc-version))
-    (redisplay)
-    (cl-case
-        (let ((default-directory (make-temp-file "intero" t)))
-          (intero-call-stack
-           nil (current-buffer) t nil "build"
-           "--copy-compiler-tool"
-           (concat "intero-" intero-package-version)
-           "--flag" "haskeline:-terminfo"
-           "--resolver" (concat "ghc-" ghc-version)
-           "ghc-paths-0.1.0.9" "mtl-2.2.2" "network-2.7.0.0" "random-1.1" "syb-0.7"))
-      (0
-       (message "Installed successfully! Starting Intero in a moment ...")
-       (bury-buffer buffer)
-       (switch-to-buffer source-buffer)
-       (intero-start-process-in-buffer buffer targets source-buffer))
-      (1
-       (with-current-buffer buffer (setq-local intero-give-up t))
-       (insert (propertize "Could not install Intero!
-
-We don't know why it failed. Please read the above output and try
-installing manually. If that doesn't work, report this as a
-problem.
-
-WHAT TO DO NEXT
-
-If you don't want to Intero to try installing itself again for
-this project, just keep this buffer around in your Emacs.
-
-If you'd like to try again next time you try use an Intero
-feature, kill this buffer.
-"
-                           'face 'compilation-error))
-       nil))))
-
-(defun intero-old-auto-install (source-buffer targets buffer stack-yaml)
-  "Automatically install Intero appropriately for BUFFER.
-Use the given TARGETS, SOURCE-BUFFER and STACK-YAML."
-  (insert
-   "
+                (wrong-version "The wrong version of Intero is installed for this Emacs package."))
+              (format "
 
 Installing intero-%s automatically ...
 
-" intero-package-version)
-  (redisplay)
-  (cl-case (intero-call-stack
-            nil (current-buffer) t stack-yaml
-            "build"
-            (with-current-buffer buffer
-              (let* ((cabal-file (intero-cabal-find-file))
-                     (package-name (intero-package-name cabal-file)))
-                ;; For local development. Most users'll
-                ;; never hit this behaviour.
-                (if (string= package-name "intero")
-                    "intero"
-                  (concat "intero-" intero-package-version))))
-            "ghc-paths" "syb"
-            "--flag" "haskeline:-terminfo")
-    (0
-     (message "Installed successfully! Starting Intero in a moment ...")
-     (bury-buffer buffer)
-     (switch-to-buffer source-buffer)
-     (intero-start-process-in-buffer buffer targets source-buffer))
-    (1
-     (with-current-buffer buffer (setq-local intero-give-up t))
-     (insert (propertize "Could not install Intero!
+" intero-package-version))
+      (redisplay)
+      (cl-case (intero-call-stack
+                nil (current-buffer) t stack-yaml
+                "build"
+                (with-current-buffer buffer
+                  (let* ((cabal-file (intero-cabal-find-file))
+                         (package-name (intero-package-name cabal-file)))
+                    ;; For local development. Most users'll
+                    ;; never hit this behaviour.
+                    (if (string= package-name "intero")
+                        "intero"
+                      (concat "intero-" intero-package-version))))
+                "ghc-paths" "syb"
+                "--flag" "haskeline:-terminfo")
+        (0
+         (message "Installed successfully! Starting Intero in a moment ...")
+         (bury-buffer buffer)
+         (switch-to-buffer source-buffer)
+         (intero-start-process-in-buffer buffer targets source-buffer))
+        (1
+         (with-current-buffer buffer (setq-local intero-give-up t))
+         (insert (propertize "Could not install Intero!
 
 We don't know why it failed. Please read the above output and try
 installing manually. If that doesn't work, report this as a
@@ -2297,8 +2258,8 @@ this project, just keep this buffer around in your Emacs.
 If you'd like to try again next time you try use an Intero
 feature, kill this buffer.
 "
-                         'face 'compilation-error))
-     nil)))
+                             'face 'compilation-error))
+         nil)))))
 
 (defun intero-start-process-in-buffer (buffer &optional targets source-buffer stack-yaml)
   "Start an Intero worker in BUFFER.
@@ -2309,7 +2270,7 @@ Uses the default stack config file, or STACK-YAML file if given."
       buffer
     (let* ((options
             (intero-make-options-list
-             (intero-executable-path stack-yaml)
+             "intero"
              (or targets
                  (let ((package-name (buffer-local-value 'intero-package-name buffer)))
                    (unless (equal "" package-name)
@@ -2412,6 +2373,11 @@ default when nil)."
           (when ignore-dot-ghci
             (list "--ghci-options" "-ignore-dot-ghci"))
           (cl-mapcan (lambda (x) (list "--ghci-options" x)) intero-extra-ghc-options)
+          (let ((dir (intero-localize-path (intero-make-temp-file "intero" t))))
+            (list "--ghci-options"
+                  (concat "-odir=" dir)
+                  "--ghci-options"
+                  (concat "-hidir=" dir)))
           targets))
 
 (defun intero-sentinel (process change)
@@ -2439,26 +2405,14 @@ This is a standard process sentinel function."
       (goto-char (point-min))
       (search-forward-regexp "cannot satisfy -package" nil t 1))))
 
-(defun intero-executable-path (stack-yaml)
-  "The path for the intero executable."
-  (intero-with-temp-buffer
-    (cl-case (save-excursion
-               (intero-call-stack
-                nil (current-buffer) t intero-stack-yaml "path" "--compiler-tools-bin"))
-      (0 (replace-regexp-in-string "[\r\n]+$" "/intero" (buffer-string)))
-      (1 "intero"))))
-
 (defun intero-installed-p ()
   "Return non-nil if intero (of the right version) is installed in the stack environment."
   (redisplay)
   (intero-with-temp-buffer
-    (if (= 0 (intero-call-stack
-              nil t nil intero-stack-yaml
-              "exec"
-              "--verbosity" "silent"
-              "--"
-              (intero-executable-path intero-stack-yaml)
-              "--version"))
+    (if (= 0 (intero-call-stack nil t nil intero-stack-yaml
+                                "exec"
+                                "--verbosity" "silent"
+                                "--" "intero" "--version"))
         (progn
           (goto-char (point-min))
           ;; This skipping comes due to https://github.com/commercialhaskell/intero/pull/216/files
@@ -2625,50 +2579,18 @@ For debugging purposes, try running the following in your terminal:
                    nil)))))))
 
 (defun intero-ghc-version ()
-  "Get the GHC version used by the project, calls only once per backend."
+  "Get the GHC version used by the project."
   (with-current-buffer (intero-buffer 'backend)
     (or intero-ghc-version
         (setq intero-ghc-version
-              (intero-ghc-version-raw)))))
-
-(defun intero-ghc-version-raw ()
-  "Get the GHC version used by the project."
-  (intero-with-temp-buffer
-    (cl-case (save-excursion
-               (intero-call-stack
-                nil (current-buffer) t intero-stack-yaml
-                "ghc" "--" "--numeric-version"))
-      (0
-       (buffer-substring (line-beginning-position) (line-end-position)))
-      (1 nil))))
-
-(defun intero-version>= (new0 old0)
-  "Is the version NEW >= OLD?"
-  (or (and (null new0) (null old0))
-      (let ((new (or new0 (list 0)))
-            (old (or old0 (list 0))))
-        (or (> (car new)
-               (car old))
-            (and (= (car new)
-                    (car old))
-                 (intero-version>= (cdr new)
-                                   (cdr old)))))))
-
-(defun intero-stack-version ()
-  "Get the version components of stack."
-  (let* ((str (intero-stack-version-raw))
-         (parts (mapcar #'string-to-number (split-string str "\\."))))
-    parts))
-
-(defun intero-stack-version-raw ()
-  "Get the Stack version in PATH."
-  (intero-with-temp-buffer
-    (cl-case (save-excursion
-               (intero-call-stack
-                nil (current-buffer) t intero-stack-yaml "--numeric-version"))
-      (0
-       (buffer-substring (line-beginning-position) (line-end-position)))
-      (1 nil))))
+              (intero-with-temp-buffer
+                (cl-case (save-excursion
+                           (intero-call-stack
+                            nil (current-buffer) t intero-stack-yaml
+                            "ghc" "--" "--numeric-version"))
+                  (0
+                   (buffer-substring (line-beginning-position) (line-end-position)))
+                  (1 nil)))))))
 
 (defun intero-get-targets ()
   "Get all available targets."
@@ -3164,16 +3086,13 @@ suggestions are available."
   (with-current-buffer (intero-buffer 'backend)
     (or intero-extensions
         (setq intero-extensions
-              (cl-remove-if-not
-               (lambda (str) (let ((case-fold-search nil))
-                               (string-match "^[A-Z][A-Za-z0-9]+$" str)))
-               (split-string
-                (shell-command-to-string
-                 (concat intero-stack-executable
-                         (if intero-stack-yaml
-                             (concat "--stack-yaml " intero-stack-yaml)
-                           "")
-                         " exec --verbosity silent -- ghc --supported-extensions"))))))))
+              (split-string
+               (shell-command-to-string
+                (concat intero-stack-executable
+                        (if intero-stack-yaml
+                            (concat "--stack-yaml " intero-stack-yaml)
+                          "")
+                        " exec --verbosity silent -- ghc --supported-extensions")))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Auto actions
